@@ -7,6 +7,7 @@
 library(rgbif)
 library(spocc)      # Interface to many species occurrence data sources
                     # Include rgbif among a number of others
+library(rinat)
 library(tidyverse)
 library(sf)
 library(mapview)
