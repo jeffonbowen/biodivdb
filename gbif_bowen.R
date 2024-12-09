@@ -2,11 +2,11 @@
 
 # Libraries and Environment Setup
 library(rgbif)
-library(spocc)      # Interface to many species occurrence data sources
-                    # Include rgbif among a number of others
 library(tidyverse)
 library(sf)
 library(mapview)
+
+## Skip down if data has already been downloaded.
 
 ## GBIF
 
@@ -25,48 +25,26 @@ usethis::edit_r_environ()
 # Queue a download on the GBIF server
 gbif_download <- occ_download(pred_in("gadm", "CAN.2.14.4_1"),
                               format = "SIMPLE_CSV")
-gbif_download
 
-# Check status with
+# Check status with the following, or check online account
 occ_download_wait(gbif_download)
 
 # Get the download and import in one step
 gbif_dat <- occ_download_get(gbif_download) %>% 
   occ_download_import()
 
-# Load downloaded data
-gbif_dat <- occ_download_get("0015650-241126133413365") %>% 
-  occ_download_import()
+write_csv(gbif_dat, "dat_bowen/gbif_bowen.csv")
 
-gbif_dat <- occ_download_import("0015650-241126133413365")
+# Read previously saved data
+gbif_dat <- read_csv("dat_bowen/gbif_bowen.csv")
 
-
-# Lots of variables. Lets clean it up a bit. 
-dat <- gbif_dat %>% 
-  select(species, locality, stateProvince, occurrenceStatus,
-         lat = decimalLatitude, long = decimalLongitude,
-         xy_uncert_m = coordinateUncertaintyInMeters,
-         eventDate, collectionCode, issue)
+## Some cleaning should probably be done. Do that later. 
 
 # Check the records
 summary(dat)
 
 # Another way to check for NAs
-colSums(is.na(dat))
-
-# Have a look at locations
-
-# Do all records have locations? No. 
-dat %>% is.nul
-
-# First make an sf object and then use mapView to map
-dat_sf <-dat %>% 
-  filter(!is.na(lat)) %>%
-  st_as_sf(coords = c("long", "lat"), crs = 4326)
-
-m <- mapView(dat_sf, cex = "xy_uncert_m")
-m
-
+colSums(is.na(gbif_dat))
 
 # For cleaning data, see the links at end of this page:
 # https://docs.ropensci.org/rgbif/articles/getting_occurrence_data.html
@@ -80,55 +58,62 @@ gbif_dat %>%
   summarize(n_species = n_distinct(verbatimScientificName))  
 
 # Have a look at the record locations
-dat %>% 
-  filter(!is.na(lat)) %>%
-  st_as_sf(coords = c("long", "lat"), crs = 4326) %>% 
-  mapView(cex = "xy_uncert_m", zcol  = "kingdom")
-
-## Add the BCSEE info.
-## Run separate script to load BCSEE data if not in memory
-
-# source(bcsee.R)
-
-dat_join <- dat %>%
-  left_join(bcsee, by = "species", relationship = "many-to-many") %>% 
-  arrange(`Element Code`)
-
-# Nest the data to summarize by species but keeping the location records
-#   which could be used for mapping, if useful.
-datn <- nest(dat_join, data = c("gbifID", "locality":"issue")) %>% 
-  rowwise() %>% 
-  mutate(n_records = nrow(data)) %>% 
-  mutate(flag = if_else(`Classification Level` == "Species", "", 
-                        "Check subspecies/var/pop")
-         ) %>% 
-  
+gbif_dat %>% 
+  filter(!is.na(decimalLatitude)) %>%
+  st_as_sf(coords = c("decimalLongitude", "decimalLatitude"), crs = 4326) %>% 
+  mapView(zcol  = "kingdom")
 
 
+## Checklist
+
+# Add the BCSEE info.
+# Run separate script to load BCSEE data if not in memory
+bcsee_gbif <- read_csv("out/bcsee_gbif.csv")
+
+checklist <- gbif_dat %>%
+  group_by(taxonKey, kingdom, phylum, class, order, family, species, 
+           infraspecificEpithet, verbatimScientificName) |> 
+  summarise(GBIF_records = n()) |> 
+  filter(!is.na(species)) |> 
+  ungroup() |> 
+  left_join(bcsee_gbif, join_by("taxonKey" == "usageKey"), multiple = "first") |> 
+  arrange(taxonKey)
+
+# Note that not all GBIF records are tracked by CDC.
+# Can add common names from GBIF to make list more approachable. 
+
+vnames <- read_tsv("backbone/VernacularName.tsv")
+
+# This is an approach to select an english name for each taxonKey.
+# Selects most common english vern name, then if tied, the first one. 
+# Its not perfect
+
+gbif_vnames_top <- vnames |>
+  filter(language == "en") |> 
+  group_by(taxonID, vernacularName) |> 
+  summarise(n = n()) |> 
+  group_by(taxonID) |> 
+  slice_max(n) |> 
+  slice_head(n = 1)
+
+checklist <- checklist |> 
+  left_join(gbif_vnames_top, join_by("taxonKey" == "taxonID"))  |> 
+  mutate(SciName_Harmonized = if_else(!is.na(`Scientific Name`),
+                                      `Scientific Name`,
+                                      verbatimScientificName),
+         EngName_Harmonized = if_else(!is.na(`English Name`),
+                                      `English Name`,
+                                      vernacularName)) |> 
+  select(taxonKey, kingdom, phylum, class, order, family, 
+         SciName_Harmonized, EngName_Harmonized, 
+         `Element Code CDC` = `Element Code`, 
+         `Global Status`, `Prov Status`, 
+         `BC List`, COSEWIC, `SARA Schedule`, `SARA Status`, SAR, GBIF_records) |> 
+  arrange(taxonKey)
 
 
+write_csv(checklist, "dat_bowen/checklist.csv")
 
-# Records in GBIF that are not in BCSEE
-# There would be some records not in BCSEE. Could be taxonomy differences.
-# Could also be ornamental plants or perhaps not considered an EO.
-dat_join %>% 
-  filter(is.na(`Scientific Name`))
-
-# Records where there is more than one join, e.g., more than one subspecies.
-dat_join %>% 
-  
-
-
-
-# Have another look at the location now that common names are added.
-dat_join %>% 
-  unnest("data") %>% 
-  select(kingdom, `English Name`, `Scientific Name`, `BC List`, 
-         COSEWIC, `SARA Status`, `SARA Schedule`, n_records, long, lat,
-         `xy_uncert_m`) %>% 
-  filter(!is.na(lat)) %>%
-  st_as_sf(coords = c("long", "lat"), crs = 4326) %>% 
-  mapView(cex = "xy_uncert_m", zcol  = "kingdom")
 
 
 
